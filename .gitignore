@@ -30,3 +30,9 @@
 *.exe
 *.out
 *.app
+nyufile
+
+# Clion
+*.xml
+*.iml
+.idea/
