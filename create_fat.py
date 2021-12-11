@@ -1,0 +1,17 @@
+import os
+
+os.system("dd if=/dev/zero of=fat32.disk bs=256k count=1")
+os.system("mkfs.fat -F 32 -f 2 -S 512 -s 1 -R 32 fat32.disk")
+os.system("fsck.fat -v fat32.disk")
+os.system("sudo mkdir /mnt/disk")
+os.system("sudo mount -o umask=0 fat32.disk /mnt/disk")
+os.system("echo \"AHello, world.\" > /mnt/disk/HELLO.TXT")
+os.system("echo \"BHello, world.\" > /mnt/disk/YANG.TXT")
+os.system("echo \"CHello, world.\" > /mnt/disk/TANG.TXT")
+os.system("echo \"DHello, world.\" > /mnt/disk/GANG.TXT")
+os.system("echo \"EHello, world.\" > /mnt/disk/HELLO1.TXT")
+os.system("mkdir /mnt/disk/DIR")
+os.system("touch /mnt/disk/EMPTY")
+os.system("sync")
+os.system("sudo umount /mnt/disk")
+os.system("xxd -s 20480 -l 512 fat32.disk")
