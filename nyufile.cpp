@@ -240,7 +240,6 @@ DirEntry getFileEntry(int fp, char *filename, long cluster) {
 
                         for (int cp = 0; cp < 20; cp++) {
                             if (resToHashString[cp] != convertedShaHash[cp]) {
-                                cout << cp << endl;
                                 break;
                             }
                             return copyEntry;
