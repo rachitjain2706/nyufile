@@ -9,6 +9,9 @@
 #include <cmath>
 #include <iomanip>
 #include <sstream>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <sys/mman.h>
 
 /*#define SHA_DIGEST_LENGTH 40*/
 
@@ -22,6 +25,37 @@ char *diskName;
 struct BootEntry bootEntry;
 char *fileName;
 char *shaHash;
+
+int printUsage() {
+
+    printf("Usage: ./nyufile disk <options>\n");
+    printf("  -i                     Print the file system information.\n");
+    printf("  -l                     List the root directory.\n");
+    printf("  -r filename [-s sha1]  Recover a contiguous file.\n");
+    printf("  -R filename -s sha1    Recover a possibly non-contiguous file.\n");
+    return -1;
+}
+
+int isValidInput(int argc, char *argv[], int isI, int isL, int isr, int isR, int isS, char *s, char *fn) {
+    if (argc <= 2) {
+        return printUsage();
+    } else if (argc == 3 && isI != 1 && isL != 1) {
+        // if 3 parameters only, either -i or -l
+        return printUsage();
+    } else if (argc == 4 && (isI == 1 || isL == 1 || isR == 1 || isS == 1)) {
+        // must be -r
+        return printUsage();
+    } else if (argc == 5) {
+        return printUsage();
+    } else if (argc == 6 && isS == 0 && (isr ^ isR) == 0) {
+        // must be one of -r or -R along with -s
+        return printUsage();
+    } else {
+        return 1;
+    }
+    return 1;
+}
+
 
 int initialize() {
     int disk = open(diskName, O_RDONLY);
@@ -133,7 +167,6 @@ void rootDirectoryInformation(int disk) {
 }
 
 DirEntry getFileEntry(int fp, char *filename, long cluster) {
-    auto *convertedName = (unsigned char *) (filename);
     int offset = 0;
     int i;
     DirEntry *dirEntry;
@@ -157,17 +190,18 @@ DirEntry getFileEntry(int fp, char *filename, long cluster) {
         if (dirEntry->DIR_Name[0] == 0) {
             if (sha1) {
                 cout << fileName << ": file not found" << endl;
+                copyEntry.DIR_FileSize = -1;
                 return copyEntry;
             }
             if (num == 0) {
                 cout << fileName << ": file not found" << endl;
+                copyEntry.DIR_FileSize = -1;
             } else if (num == 1) {
-                /*answerVec.at(0)->DIR_Name[0] = name[0];*/
-                cout << "DEBUG direntry: " << answerVec.at(0).DIR_FstClusHI << "-" << answerVec.at(0).DIR_FstClusLO
-                     << endl;
+                answerVec.at(0).DIR_Name[0] = name[0];
                 return answerVec.at(0);
             } else {
                 cout << fileName << ": multiple candidates found" << endl;
+                copyEntry.DIR_FileSize = -1;
             }
             return copyEntry;
         }
@@ -179,25 +213,41 @@ DirEntry getFileEntry(int fp, char *filename, long cluster) {
             }
             if (i == 11) {
                 if (sha1) {
-                    unsigned char resHash[SHA_DIGEST_LENGTH];
-                    dirEntry->DIR_Name[0] = name[0];
-                    /*cout << "DEBUG DIR_Name: " << dirEntry->DIR_Name << endl;*/
-                    /*SHA1(dirEntry->DIR_Name, sizeof(dirEntry->DIR_Name) - 1, resHash);*/
-                    SHA1(convertedName, sizeof(convertedName), resHash);
-                    /*cout << convertedName << endl;*/
-                    auto *convertedShaHash = (unsigned char *) (shaHash);
-                    cout << "DEBUG resHash: ";
-                    for (int cp = 0; cp < 20; cp++) {
-                        printf("%02x", resHash[cp]);
+                    copyEntry.DIR_FstClusHI = dirEntry->DIR_FstClusHI;
+                    copyEntry.DIR_FstClusLO = dirEntry->DIR_FstClusLO;
+                    copyEntry.DIR_FileSize = dirEntry->DIR_FileSize;
+
+                    if (copyEntry.DIR_FileSize == 0) {
+                        string emptySha1 = "da39a3ee5e6b4b0d3255bfef95601890afd80709";
+                        const char *cstr = emptySha1.c_str();
+                        if (strcmp(cstr, shaHash) == 0) {
+                            return copyEntry;
+                        }
+                    } else {
+                        unsigned char *fileBuffer;
+                        fileBuffer = static_cast<unsigned char *>(malloc(copyEntry.DIR_FileSize));
+                        long cluster = copyEntry.DIR_FstClusHI * 65535 + copyEntry.DIR_FstClusLO;
+                        pread(fp, fileBuffer, copyEntry.DIR_FileSize, getAddressByCluster(cluster));
+                        unsigned char resHash[SHA_DIGEST_LENGTH];
+                        SHA1(fileBuffer, strlen(reinterpret_cast<const char *>(fileBuffer)), resHash);
+                        auto *convertedShaHash = (unsigned char *) (shaHash);
+                        std::stringstream ss;
+                        ss << std::hex << std::setfill('0');
+                        for (int cp = 0; cp < 20; ++cp) {
+                            ss << std::setw(2) << static_cast<unsigned>(resHash[cp]);
+                        }
+                        string resToHashString = ss.str();
+
+                        for (int cp = 0; cp < 20; cp++) {
+                            if (resToHashString[cp] != convertedShaHash[cp]) {
+                                cout << cp << endl;
+                                break;
+                            }
+                            return copyEntry;
+                        }
                     }
-                    cout << endl;
-                    if (resHash == convertedShaHash) {
-                        return copyEntry;
-                    }
+
                 }
-                /*copyDirEntry = dirEntry;*/
-                cout << "DEBUG before vector direntry: " << dirEntry->DIR_FstClusHI << "-" << dirEntry->DIR_FstClusLO
-                     << endl;
                 copyEntry.DIR_FstClusHI = dirEntry->DIR_FstClusHI;
                 copyEntry.DIR_FstClusLO = dirEntry->DIR_FstClusLO;
                 copyEntry.DIR_FileSize = dirEntry->DIR_FileSize;
@@ -207,7 +257,6 @@ DirEntry getFileEntry(int fp, char *filename, long cluster) {
         }
         offset += sizeof(DirEntry);
         if (offset == getClusterSize()) {
-            cout << "DEBUG getFileEntry()" << endl;
             cluster = getNextCluster(cluster, fp);
             offset = 0;
         }
@@ -219,7 +268,6 @@ DirEntry getFileEntry(int fp, char *filename, long cluster) {
 void updateFAT(long cluster, int numClusters, int disk, FILE *fp) {
     /*uint32_t startingPointer = getNextCluster(cluster, disk);*/
     uint32_t startingPointer = bootEntry.BPB_RsvdSecCnt * bootEntry.BPB_BytsPerSec;
-    cout << "DEBUG startingPointer: " << startingPointer << endl;
     while (numClusters >= 1) {
         fseek(fp, startingPointer + cluster * 4, SEEK_SET);
         char *str = (char *) malloc(3 * sizeof(char));
@@ -233,7 +281,6 @@ void updateFAT(long cluster, int numClusters, int disk, FILE *fp) {
             str[1] = 0xff;
         }
         fputs(str, fp);
-        cout << "DEBUG numClusters: " << numClusters << endl;
         numClusters--;
         cluster++;
     }
@@ -249,11 +296,10 @@ void recoverContiguousFile(int disk) {
     cluster = bootEntry.BPB_RootClus;
     DirEntry de = getFileEntry(disk, temp_fileName, cluster);
     dirEntry = &de;
-    if (dirEntry == nullptr) {
+    if (dirEntry == nullptr || dirEntry->DIR_FileSize == -1) {
         return;
     }
     cluster = dirEntry->DIR_FstClusHI * 65535 + dirEntry->DIR_FstClusLO;
-    /*cout << "DEBUG cluster: " << cluster << endl;*/
     fileSize = dirEntry->DIR_FileSize;
     if (cluster != 0 && getNextCluster(cluster, disk) != 0) {
         return;
@@ -267,13 +313,11 @@ void recoverContiguousFile(int disk) {
     char *fileBuffer;
     fileBuffer = static_cast<char *>(malloc(fileSize));
     pread(disk, fileBuffer, fileSize, getAddressByCluster(cluster));
-    cout << "DEBUG file buffer: " << fileBuffer << endl;
     FILE *fp = fopen(diskName, "r+");
     fseek(fp, getAddressByCluster(cluster), SEEK_SET);
     unsigned char fileChar;
     fread(&fileChar, 1, 1, fp);
     long index = rootDirectoryIndex(disk, cluster);
-    /*cout << "DEBUG index: " << index << endl;*/
     long fileAddress =
             getAddressByCluster(bootEntry.BPB_RootClus) + (index * sizeof(DirEntry)) +
             1;
@@ -298,57 +342,111 @@ void recoverContiguousFile(int disk) {
 }
 
 void fileRecoverySHA() {
-    cout << "DEBUG SHA-1: " << shaHash << endl;
+//    cout << "DEBUG SHA-1: " << shaHash << endl;
 }
 
-void printUsage() {
-    cout << "Usage: ./nyufile disk <options>" << endl;
-    cout << "-i\tPrint the file system information." << endl;
-    cout << "-l\tList the root directory." << endl;
-    cout << "-r filename [-s sha1]\tRecover a contiguous file." << endl;
-    cout << "-R filename -s sha1\tRecover a possibly non-contiguous file." << endl;
-}
+//void printUsage() {
+//    cout << "Usage: ./nyufile disk <options>" << endl;
+//    cout << "-i\tPrint the file system information." << endl;
+//    cout << "-l\tList the root directory." << endl;
+//    cout << "-r filename [-s sha1]\tRecover a contiguous file." << endl;
+//    cout << "-R filename -s sha1\tRecover a possibly non-contiguous file." << endl;
+//}
 
 int parseInput(int argc, char *argv[]) {
-    int c;
-    opterr = 0;
-    if (argc <= 1) {
-        printUsage();
-        return 0;
-    }
-    diskName = argv[1];
+    int isI = 0;
+    int isL = 0;
+    int isr = 0;
+    int isR = 0;
+    int isS = 0;
 
-    while ((c = getopt(argc, argv, "ilr:R:s:")) != -1) {
-        switch (c) {
+    int ch;
+    char *s, *fn;
+
+    if (argc > 1) {
+        diskName = argv[1];
+    }
+
+    while ((ch = getopt(argc, argv, "ilr:R:s:")) != -1) {
+        switch (ch) {
             case 'i':
-                readFileSystemInformation = true;
+                isI = 1;
                 break;
             case 'l':
-                readRootDirectoryInformation = true;
+                isL = 1;
                 break;
             case 'r':
-                readRecoverContiguousFile = true;
-                fileName = optarg;
+                isr = 1;
+                fn = optarg;
+                fileName = fn;
                 break;
             case 'R':
-                fileName = optarg;
+                isR = 1;
+                fn = optarg;
+                fileName = fn;
                 break;
             case 's':
+                isS = 1;
+                s = optarg;
                 sha1 = true;
-                /*c91761a2cc1562d36585614c8c680ecf5712e875 - GANG.TXT*/
-                /*4e0a5acd4f36681b2df7e097a82c4f4b74b3f096 - TANG.TXT*/
-                shaHash = optarg;
+                shaHash = s;
                 break;
-            default:
-                printUsage();
-                return 0;
         }
     }
+
+    int isValid = isValidInput(argc, argv, isI, isL, isr, isR, isS, s, fn);
+
+    if (isValid == -1) {
+        return -1;
+    } else {
+        readFileSystemInformation = (isI == 1); // TODO: Init to true for M1 due to getopt
+        readRootDirectoryInformation = (isL == 1); // TODO: Init to true for M1 due to getopt
+        readRecoverContiguousFile = (isr == 1);
+    }
+
+//    int c;
+//    opterr = 0;
+//    if (argc <= 1) {
+//        printUsage();
+//        return 0;
+//    }
+//    diskName = argv[1];
+//
+//    while ((c = getopt(argc, argv, "ilr:R:s:")) != -1) {
+//        switch (c) {
+//            case 'i':
+//                readFileSystemInformation = true;
+//                break;
+//            case 'l':
+//                readRootDirectoryInformation = true;
+//                break;
+//            case 'r':
+//                readRecoverContiguousFile = true;
+//                fileName = optarg;
+//                break;
+//            case 'R':
+//                fileName = optarg;
+//                break;
+//            case 's':
+//                sha1 = true;
+//                /*80ab567463b7cbb9ecebe94664a1cb6e7ff5518d - BEL.TXT*/
+//                /*91298ebbd4f3e8ffd43f6b3723052ca81288894c - HELLO.TXT*/
+//                shaHash = optarg;
+//                break;
+//            default:
+//                printUsage();
+//                return 0;
+//        }
+//    }
     return 1;
 }
 
 int main(int argc, char *argv[]) {
-    parseInput(argc, argv);
+    int res = parseInput(argc, argv);
+    if (res == -1) {
+        return 0;
+    }
+
     int disk = initialize();
     if (readFileSystemInformation) {
         fileSystemInformation();
