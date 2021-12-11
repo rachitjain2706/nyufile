@@ -6,6 +6,9 @@
 #include <openssl/sha.h>
 #include <vector>
 #include <stdio.h>
+#include <cmath>
+#include <iomanip>
+#include <sstream>
 
 /*#define SHA_DIGEST_LENGTH 40*/
 
@@ -46,6 +49,45 @@ long getNextCluster(long cluster, int fp) {
 long getAddressByCluster(long cluster) {
     return (bootEntry.BPB_RsvdSecCnt + bootEntry.BPB_NumFATs * bootEntry.BPB_FATSz32) * bootEntry.BPB_BytsPerSec +
            (cluster - bootEntry.BPB_RootClus) * getClusterSize();
+}
+
+long rootDirectoryIndex(int disk, long startingCluster) {
+    struct DirEntry dirEntry;
+    long cluster = bootEntry.BPB_RootClus;
+    long offset = 0, num = 0, i;
+    long position;
+    while (cluster < 0x0ffffff7 &&
+           pread(disk, &dirEntry, sizeof(DirEntry), getAddressByCluster(cluster) + offset) >= 0) {
+        if (dirEntry.DIR_Name[0] == 0) {
+            break;
+        }
+        string dirNameInDirectory;
+        for (i = 0; i < 11; i++) {
+            if (i == 8 && dirEntry.DIR_Name[i] != ' ') {
+                dirNameInDirectory += ".";
+            }
+            if (dirEntry.DIR_Name[i] == 0xe5) { // Deleted file
+                dirNameInDirectory += "?";
+                continue;
+            } else if (dirEntry.DIR_Name[i] == ' ') {
+                continue;
+            } else {
+                dirNameInDirectory += dirEntry.DIR_Name[i];
+            }
+        }
+
+        position = dirEntry.DIR_FstClusHI * 65535 + dirEntry.DIR_FstClusLO;
+        if (position == startingCluster) {
+            return num;
+        }
+        num++;
+        offset += sizeof(DirEntry);
+        if (offset == getClusterSize()) {
+            cluster = getNextCluster(cluster, disk);
+            offset = 0;
+        }
+    }
+    cout << "Total number of entries = " << num << endl;
 }
 
 void rootDirectoryInformation(int disk) {
@@ -90,12 +132,13 @@ void rootDirectoryInformation(int disk) {
     cout << "Total number of entries = " << num << endl;
 }
 
-DirEntry *getFileEntry(int fp, char *filename, long cluster) {
+DirEntry getFileEntry(int fp, char *filename, long cluster) {
     auto *convertedName = (unsigned char *) (filename);
     int offset = 0;
     int i;
     DirEntry *dirEntry;
-    vector<DirEntry *> answerVec;
+    vector<DirEntry> answerVec;
+    DirEntry copyEntry;
     dirEntry = static_cast<DirEntry *>(malloc(sizeof(DirEntry)));
     char name[11];
     int num = 0;
@@ -114,17 +157,19 @@ DirEntry *getFileEntry(int fp, char *filename, long cluster) {
         if (dirEntry->DIR_Name[0] == 0) {
             if (sha1) {
                 cout << fileName << ": file not found" << endl;
-                return nullptr;
+                return copyEntry;
             }
             if (num == 0) {
                 cout << fileName << ": file not found" << endl;
             } else if (num == 1) {
-                answerVec.at(0)->DIR_Name[0] = name[0];
+                /*answerVec.at(0)->DIR_Name[0] = name[0];*/
+                cout << "DEBUG direntry: " << answerVec.at(0).DIR_FstClusHI << "-" << answerVec.at(0).DIR_FstClusLO
+                     << endl;
                 return answerVec.at(0);
             } else {
                 cout << fileName << ": multiple candidates found" << endl;
             }
-            return nullptr;
+            return copyEntry;
         }
         if (dirEntry->DIR_Name[0] == 0xe5) {
             for (i = 1; i < 11; i++) {
@@ -147,11 +192,16 @@ DirEntry *getFileEntry(int fp, char *filename, long cluster) {
                     }
                     cout << endl;
                     if (resHash == convertedShaHash) {
-                        return dirEntry;
+                        return copyEntry;
                     }
                 }
                 /*copyDirEntry = dirEntry;*/
-                answerVec.push_back(dirEntry);
+                cout << "DEBUG before vector direntry: " << dirEntry->DIR_FstClusHI << "-" << dirEntry->DIR_FstClusLO
+                     << endl;
+                copyEntry.DIR_FstClusHI = dirEntry->DIR_FstClusHI;
+                copyEntry.DIR_FstClusLO = dirEntry->DIR_FstClusLO;
+                copyEntry.DIR_FileSize = dirEntry->DIR_FileSize;
+                answerVec.push_back(copyEntry);
                 num++;
             }
         }
@@ -163,7 +213,31 @@ DirEntry *getFileEntry(int fp, char *filename, long cluster) {
         }
     }
     /*free(dirEntry);*/
-    return nullptr;
+    return copyEntry;
+}
+
+void updateFAT(long cluster, int numClusters, int disk, FILE *fp) {
+    /*uint32_t startingPointer = getNextCluster(cluster, disk);*/
+    uint32_t startingPointer = bootEntry.BPB_RsvdSecCnt * bootEntry.BPB_BytsPerSec;
+    cout << "DEBUG startingPointer: " << startingPointer << endl;
+    while (numClusters >= 1) {
+        fseek(fp, startingPointer + cluster * 4, SEEK_SET);
+        char *str = (char *) malloc(3 * sizeof(char));
+        str[1] = 0;
+        str[0] = (char) (cluster + 1);
+        if (numClusters == 1) {
+            str = (char *) malloc(5 * sizeof(char));
+            str[0] = 0xff;
+            str[3] = 0x0f;
+            str[2] = 0xff;
+            str[1] = 0xff;
+        }
+        fputs(str, fp);
+        cout << "DEBUG numClusters: " << numClusters << endl;
+        numClusters--;
+        cluster++;
+    }
+
 }
 
 void recoverContiguousFile(int disk) {
@@ -173,12 +247,13 @@ void recoverContiguousFile(int disk) {
     char *temp_fileName = static_cast<char *>(malloc(sizeof(fileName) + 1));
     strcpy(temp_fileName, fileName);
     cluster = bootEntry.BPB_RootClus;
-    dirEntry = getFileEntry(disk, temp_fileName, cluster);
+    DirEntry de = getFileEntry(disk, temp_fileName, cluster);
+    dirEntry = &de;
     if (dirEntry == nullptr) {
         return;
     }
     cluster = dirEntry->DIR_FstClusHI * 65535 + dirEntry->DIR_FstClusLO;
-    cout << "DEBUG cluster: " << cluster << endl;
+    /*cout << "DEBUG cluster: " << cluster << endl;*/
     fileSize = dirEntry->DIR_FileSize;
     if (cluster != 0 && getNextCluster(cluster, disk) != 0) {
         return;
@@ -192,17 +267,33 @@ void recoverContiguousFile(int disk) {
     char *fileBuffer;
     fileBuffer = static_cast<char *>(malloc(fileSize));
     pread(disk, fileBuffer, fileSize, getAddressByCluster(cluster));
+    cout << "DEBUG file buffer: " << fileBuffer << endl;
     FILE *fp = fopen(diskName, "r+");
     fseek(fp, getAddressByCluster(cluster), SEEK_SET);
-    unsigned char firstFileChar;
-    fread(&firstFileChar, 1, 1, fp);
+    unsigned char fileChar;
+    fread(&fileChar, 1, 1, fp);
+    long index = rootDirectoryIndex(disk, cluster);
+    /*cout << "DEBUG index: " << index << endl;*/
     long fileAddress =
-            getAddressByCluster(bootEntry.BPB_RootClus) + ((cluster - bootEntry.BPB_RootClus - 1) * sizeof(DirEntry)) +
+            getAddressByCluster(bootEntry.BPB_RootClus) + (index * sizeof(DirEntry)) +
             1;
     fseek(fp, fileAddress, SEEK_SET);
     fseek(fp, -1, SEEK_CUR);
     fputc(fileName[0], fp);
-    close(disk);
+    int numClusters = ceil(dirEntry->DIR_FileSize / bootEntry.BPB_BytsPerSec);
+    if (numClusters > 1) {
+        updateFAT(cluster, numClusters, disk, fp);
+    } else {
+        uint32_t startingPointer = bootEntry.BPB_RsvdSecCnt * bootEntry.BPB_BytsPerSec;
+        fseek(fp, startingPointer + cluster * 4, SEEK_SET);
+        char *str = (char *) malloc(5 * sizeof(char));
+        str[0] = 0xff;
+        str[3] = 0x0f;
+        str[2] = 0xff;
+        str[1] = 0xff;
+        fputs(str, fp);
+    }
+    /*close(disk);*/
     fclose(fp);
 }
 
